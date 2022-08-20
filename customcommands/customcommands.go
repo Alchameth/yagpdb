@@ -380,9 +380,9 @@ func filterEmptyResponses(s string, ss ...string) []string {
 
 const (
 	MaxCommands        = 100
-	MaxCommandsPremium = 250
-	MaxUserMessages    = 20
-	MaxGroups          = 50
+	MaxCommandsPremium = 500
+	MaxUserMessages    = 100
+	MaxGroups          = 100
 )
 
 func MaxCommandsForContext(ctx context.Context) int {
