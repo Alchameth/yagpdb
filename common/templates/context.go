@@ -18,9 +18,11 @@ import (
 	"github.com/botlabs-gg/yagpdb/v2/common"
 	"github.com/botlabs-gg/yagpdb/v2/common/prefix"
 	"github.com/botlabs-gg/yagpdb/v2/common/scheduledevents2"
+	"github.com/botlabs-gg/yagpdb/v2/lib/confusables"
 	"github.com/botlabs-gg/yagpdb/v2/lib/discordgo"
 	"github.com/botlabs-gg/yagpdb/v2/lib/dstate"
 	"github.com/botlabs-gg/yagpdb/v2/lib/template"
+	"github.com/botlabs-gg/yagpdb/v2/web/discorddata"
 	"github.com/sirupsen/logrus"
 	"github.com/vmihailenco/msgpack"
 )
@@ -38,20 +40,21 @@ var (
 		"toByte":     ToByte,
 
 		// string manipulation
-		"hasPrefix":   strings.HasPrefix,
-		"hasSuffix":   strings.HasSuffix,
-		"joinStr":     joinStrings,
-		"lower":       strings.ToLower,
-		"slice":       slice,
-		"split":       strings.Split,
-		"title":       strings.Title,
-		"trimSpace":   strings.TrimSpace,
-		"upper":       strings.ToUpper,
-		"urlescape":   url.PathEscape,
-		"urlunescape": url.PathUnescape,
-		"print":       withOutputLimit(fmt.Sprint, MaxStringLength),
-		"println":     withOutputLimit(fmt.Sprintln, MaxStringLength),
-		"printf":      withOutputLimitF(fmt.Sprintf, MaxStringLength),
+		"hasPrefix":    strings.HasPrefix,
+		"hasSuffix":    strings.HasSuffix,
+		"joinStr":      joinStrings,
+		"lower":        strings.ToLower,
+		"slice":        slice,
+		"split":        strings.Split,
+		"title":        strings.Title,
+		"trimSpace":    strings.TrimSpace,
+		"upper":        strings.ToUpper,
+		"urlescape":    url.PathEscape,
+		"urlunescape":  url.PathUnescape,
+		"print":        withOutputLimit(fmt.Sprint, MaxStringLength),
+		"println":      withOutputLimit(fmt.Sprintln, MaxStringLength),
+		"printf":       withOutputLimitF(fmt.Sprintf, MaxStringLength),
+		"sanitizeText": confusables.SanitizeText,
 
 		// regexp
 		"reQuoteMeta": regexp.QuoteMeta,
@@ -95,22 +98,27 @@ var (
 		"complexMessageEdit": CreateMessageEdit,
 		"kindOf":             KindOf,
 
-		"formatTime":      tmplFormatTime,
-		"snowflakeToTime": tmplSnowflakeToTime,
-		"loadLocation":    time.LoadLocation,
-		"json":            tmplJson,
-		"jsonToSdict":     tmplJSONToSDict,
-		"in":              in,
-		"inFold":          inFold,
-		"roleAbove":       roleIsAbove,
-		"adjective":       common.RandomAdjective,
-		"noun":            common.RandomNoun,
-		"verb":            common.RandomVerb,
-		"randInt":         randInt,
-		"shuffle":         shuffle,
-		"seq":             sequence,
+		"adjective":   common.RandomAdjective,
+		"in":          in,
+		"inFold":      inFold,
+		"json":        tmplJson,
+		"jsonToSdict": tmplJSONToSDict,
+		"noun":        common.RandomNoun,
+		"randInt":     randInt,
+		"roleAbove":   roleIsAbove,
+		"seq":         sequence,
+
+		"shuffle": shuffle,
+		"verb":    common.RandomVerb,
+
+		// time functions
 		"currentTime":     tmplCurrentTime,
+		"parseTime":       tmplParseTime,
+		"formatTime":      tmplFormatTime,
+		"loadLocation":    time.LoadLocation,
 		"newDate":         tmplNewDate,
+		"snowflakeToTime": tmplSnowflakeToTime,
+		"timestampToTime": tmplTimestampToTime,
 		"weekNumber":      tmplWeekNumber,
 
 		"humanizeDurationHours":   tmplHumanizeDurationHours,
@@ -166,6 +174,8 @@ type Context struct {
 	CurrentFrame *ContextFrame
 
 	IsExecedByLeaveMessage bool
+
+	IsExecedByEvalCC bool
 
 	contextFuncsAdded bool
 }
@@ -310,8 +320,10 @@ func (c *Context) Parse(source string) (*template.Template, error) {
 }
 
 const (
-	MaxOpsNormal  = 1000000
-	MaxOpsPremium = 2500000
+	MaxOpsNormal      = 1000000
+	MaxOpsPremium     = 2500000
+	MaxOpsEvalNormal  = 5000
+	MaxOpsEvalPremium = 10000
 )
 
 func (c *Context) Execute(source string) (string, error) {
@@ -327,15 +339,20 @@ func (c *Context) Execute(source string) (string, error) {
 		}
 		if c.GS != nil {
 			c.Msg.GuildID = c.GS.ID
-
-			member, err := bot.GetMember(c.GS.ID, c.BotUser.ID)
-			if err != nil {
-				return "", errors.WithMessage(err, "ctx.Execute")
+			if bot.State != nil {
+				member, err := bot.GetMember(c.GS.ID, c.BotUser.ID)
+				if err != nil {
+					return "", errors.WithMessage(err, "ctx.Execute")
+				}
+				c.Msg.Member = member.DgoMember()
+			} else {
+				member, err := discorddata.GetMember(c.GS.ID, c.BotUser.ID)
+				if err != nil {
+					return "", errors.WithMessage(err, "ctx.Execute")
+				}
+				c.Msg.Member = member
 			}
-
-			c.Msg.Member = member.DgoMember()
 		}
-
 	}
 
 	c.setupBaseData()
@@ -354,8 +371,14 @@ func (c *Context) executeParsed() (string, error) {
 
 	if c.IsPremium {
 		parsed = parsed.MaxOps(MaxOpsPremium)
+		if c.IsExecedByEvalCC {
+			parsed = parsed.MaxOps(MaxOpsEvalPremium)
+		}
 	} else {
 		parsed = parsed.MaxOps(MaxOpsNormal)
+		if c.IsExecedByEvalCC {
+			parsed = parsed.MaxOps(MaxOpsEvalNormal)
+		}
 	}
 
 	var buf bytes.Buffer
@@ -527,6 +550,9 @@ func (c *Context) IncreaseCheckCallCounterPremium(key string, normalLimit, premi
 }
 
 func (c *Context) IncreaseCheckGenericAPICall() bool {
+	if c.IsExecedByEvalCC {
+		return c.IncreaseCheckCallCounter("api_call", 20)
+	}
 	return c.IncreaseCheckCallCounter("api_call", 100)
 }
 

@@ -61,7 +61,7 @@ var _ bot.BotInitHandler = (*Plugin)(nil)
 var _ commands.CommandProvider = (*Plugin)(nil)
 
 func (p *Plugin) AddCommands() {
-	commands.AddRootCommands(p, cmdListCommands, cmdFixCommands)
+	commands.AddRootCommands(p, cmdListCommands, cmdFixCommands, cmdEvalCommand)
 }
 
 func (p *Plugin) BotInit() {
@@ -117,15 +117,95 @@ type DelayedRunCCData struct {
 	IsExecedByLeaveMessage bool `json:"is_execed_by_leave_message"`
 }
 
+var cmdEvalCommand = &commands.YAGCommand{
+	CmdCategory:  commands.CategoryTool,
+	Name:         "Evalcc",
+	Description:  "executes custom command code (up to 1k characters)",
+	RequiredArgs: 1,
+	Arguments: []*dcmd.ArgDef{
+		{Name: "code", Type: dcmd.String},
+	},
+	SlashCommandEnabled: false,
+	DefaultEnabled:      true,
+	RunFunc: func(data *dcmd.Data) (interface{}, error) {
+		hasCoreWriteRole := false
+
+		writeRoles := common.GetCoreServerConfCached(data.GuildData.GS.ID).AllowedWriteRoles
+		for _, r := range data.GuildData.MS.Member.Roles {
+			if common.ContainsInt64Slice(writeRoles, r) {
+				hasCoreWriteRole = true
+				break
+			}
+		}
+
+		adminOrPerms, err := bot.AdminOrPermMS(data.GuildData.GS.ID, data.GuildData.CS.ID, data.GuildData.MS, discordgo.PermissionManageServer)
+		if err != nil {
+			return nil, err
+		}
+
+		if !(adminOrPerms || hasCoreWriteRole) {
+			return "You need `Manage Server` permissions or control panel write access for this command", nil
+		}
+
+		// Disallow calling via exec / execAdmin
+		if data.Context().Value(commands.CtxKeyExecutedByCC) == true {
+			return "", nil
+		}
+
+		channel := data.GuildData.CS
+		ctx := templates.NewContext(data.GuildData.GS, channel, data.GuildData.MS)
+		ctx.IsExecedByEvalCC = true
+
+		code := parseCodeblock(data.Args[0].Str())
+
+		// Encourage only small code snippets being tested with this command
+		maxRunes := 1000
+		if utf8.RuneCountInString(code) > maxRunes {
+			return "Code is too long for in-place evaluation. Please use the control panel.", nil
+		}
+
+		if channel == nil {
+			return "Something weird happened... Contact the support server.", nil
+		}
+
+		out, err := ctx.Execute(code)
+
+		if err != nil {
+			return formatCustomCommandRunErr(code, err), err
+		}
+
+		return out, nil
+	},
+}
+
+// Also accepts spaces due to how dcmd reconstructs arguments wrapped in triple backticks.
+var codeblockRegexp = regexp.MustCompile(`(?m)\A(?:\x60{2} ?\x60)(?:go(?:lang)?\n)?([\S\s]+)(?:\x60 ?\x60{2})\z`)
+
+// parseCodeblock returns the content wrapped in a Discord markdown block.
+// If no (valid) codeblock was found, the given input is returned back.
+func parseCodeblock(input string) string {
+	parts := codeblockRegexp.FindStringSubmatch(input)
+
+	// No match found, input was not wrapped in (valid) codeblock markdown
+	// just dump it, don't bother fixing things for the user.
+	if parts == nil {
+		return input
+	}
+
+	logger.Debugf("Found matches: %#v", parts)
+	logger.Debugf("Returning %s", parts[1])
+	return parts[1]
+}
+
 var cmdListCommands = &commands.YAGCommand{
 	CmdCategory:    commands.CategoryTool,
 	Name:           "CustomCommands",
 	Aliases:        []string{"cc"},
-	Description:    "Shows a custom command specified by id or trigger, or lists them all",
+	Description:    "Shows a custom command specified by id, trigger, or name, or lists them all",
 	ArgumentCombos: [][]int{{0}, {1}, {}},
 	Arguments: []*dcmd.ArgDef{
 		{Name: "ID", Type: dcmd.Int},
-		{Name: "Trigger", Type: dcmd.String},
+		{Name: "Name-Or-Trigger", Type: dcmd.String},
 	},
 	SlashCommandEnabled: true,
 	DefaultEnabled:      false,
@@ -158,7 +238,7 @@ var cmdListCommands = &commands.YAGCommand{
 				return "This server has no custom commands, sry.", nil
 			}
 			if provided {
-				return "No command by that name or id found, here is a list of them all:\n" + list, nil
+				return "No command by that id, trigger or name found, here is a list of them all:\n" + list, nil
 			} else {
 				return "No id or trigger provided, here is a list of all server commands:\n" + list, nil
 			}
@@ -188,12 +268,24 @@ var cmdListCommands = &commands.YAGCommand{
 				Reader: &buf,
 			}
 		}
+
 		// Every text-based custom command trigger has a numerical value less than 5, so this is quite safe to do
 		if cc.TriggerType < 5 {
+			var header string
+			if cc.TextTrigger == "" {
+				cc.TextTrigger = `​`
+			}
+			if cc.Name.Valid {
+				header = fmt.Sprintf("#%d - Trigger: `%s` - Type: `%s` - Name: `%s` - Case sensitive trigger: `%t` - Group: `%s` - Disabled: `%t`",
+					cc.LocalID, cc.TextTrigger, CommandTriggerType(cc.TriggerType), cc.Name.String, cc.TextTriggerCaseSensitive, groupMap[cc.GroupID.Int64], cc.Disabled)
+			} else {
+				header = fmt.Sprintf("#%d - Trigger: `%s` - Type: `%s` - Case sensitive trigger: `%t` - Group: `%s` - Disabled: `%t`",
+					cc.LocalID, cc.TextTrigger, CommandTriggerType(cc.TriggerType), cc.TextTriggerCaseSensitive, groupMap[cc.GroupID.Int64], cc.Disabled)
+			}
+
 			if ccFile != nil {
 				msg = &discordgo.MessageSend{
-					Content: fmt.Sprintf("#%d - %s: `%s` - Case sensitive trigger: `%t` Group: `%s`",
-						cc.LocalID, CommandTriggerType(cc.TriggerType), cc.TextTrigger, cc.TextTriggerCaseSensitive, groupMap[cc.GroupID.Int64]),
+					Content: header,
 					Files: []*discordgo.File{
 						ccFile,
 					},
@@ -201,13 +293,19 @@ var cmdListCommands = &commands.YAGCommand{
 				return msg, nil
 			}
 
-			return fmt.Sprintf("#%d - %s: `%s` - Case sensitive trigger: `%t` - Group: `%s`\n```%s\n%s\n```",
-				cc.LocalID, CommandTriggerType(cc.TriggerType), cc.TextTrigger, cc.TextTriggerCaseSensitive,
-				groupMap[cc.GroupID.Int64], highlight, strings.Join(cc.Responses, "```\n```")), nil
+			return fmt.Sprintf("%s\n```%s\n%s\n```", header, highlight, strings.Join(cc.Responses, "```\n```")), nil
 		}
+
 		if ccFile != nil {
+			var header string
+			if cc.Name.Valid {
+				header = fmt.Sprintf("#%d - Type: `%s` - Name: `%s` - Group: `%s` - Disabled: `%t`", cc.LocalID, CommandTriggerType(cc.TriggerType), cc.Name.String, groupMap[cc.GroupID.Int64], cc.Disabled)
+			} else {
+				header = fmt.Sprintf("#%d - Type: `%s` - Group: `%s` - Disabled: `%t`", cc.LocalID, CommandTriggerType(cc.TriggerType), groupMap[cc.GroupID.Int64], cc.Disabled)
+			}
+
 			msg = &discordgo.MessageSend{
-				Content: fmt.Sprintf("#%d - %s - Group `%s`", cc.LocalID, CommandTriggerType(cc.TriggerType), groupMap[cc.GroupID.Int64]),
+				Content: header,
 				Files: []*discordgo.File{
 					ccFile,
 				},
@@ -217,8 +315,14 @@ var cmdListCommands = &commands.YAGCommand{
 
 		}
 
-		return fmt.Sprintf("#%d - %s - Group: `%s`\n```%s\n%s\n```",
-			cc.LocalID, CommandTriggerType(cc.TriggerType), groupMap[cc.GroupID.Int64],
+		if cc.Name.Valid {
+			return fmt.Sprintf("#%d - Type: `%s` - Name: `%s` - Group: `%s` - Disabled: `%t`\n```%s\n%s\n```",
+				cc.LocalID, CommandTriggerType(cc.TriggerType), cc.Name.String, groupMap[cc.GroupID.Int64], cc.Disabled,
+				highlight, strings.Join(cc.Responses, "```\n```")), nil
+		}
+
+		return fmt.Sprintf("#%d - Type: `%s` - Group: `%s` - Disabled: `%t`\n```%s\n%s\n```",
+			cc.LocalID, CommandTriggerType(cc.TriggerType), groupMap[cc.GroupID.Int64], cc.Disabled,
 			highlight, strings.Join(cc.Responses, "```\n```")), nil
 	},
 }
@@ -236,10 +340,10 @@ func FindCommands(ccs []*models.CustomCommand, data *dcmd.Data) (foundCCS []*mod
 			}
 		}
 	} else if data.Args[1].Value != nil {
-		// Find by name
-		name := data.Args[1].Str()
+		// Find by trigger/name
+		nameOrTrigger := data.Args[1].Str()
 		for _, v := range ccs {
-			if strings.EqualFold(name, v.TextTrigger) {
+			if strings.EqualFold(nameOrTrigger, v.TextTrigger) || (v.Name.Valid && strings.EqualFold(nameOrTrigger, v.Name.String)) {
 				foundCCS = append(foundCCS, v)
 			}
 		}
@@ -252,12 +356,24 @@ func FindCommands(ccs []*models.CustomCommand, data *dcmd.Data) (foundCCS []*mod
 
 func StringCommands(ccs []*models.CustomCommand, gMap map[int64]string) string {
 	out := ""
+
 	for _, cc := range ccs {
 		switch {
 		case cc.TriggerType >= 5:
-			out += fmt.Sprintf("`#%3d:` %s - Group: `%s`\n", cc.LocalID, CommandTriggerType(cc.TriggerType).String(), gMap[cc.GroupID.Int64])
+			if cc.Name.Valid {
+				out += fmt.Sprintf("`#%3d:` - Type: `%s` - Name: `%s` - Group: `%s` - Disabled: `%t`\n", cc.LocalID, CommandTriggerType(cc.TriggerType).String(), cc.Name.String, gMap[cc.GroupID.Int64], cc.Disabled)
+			} else {
+				out += fmt.Sprintf("`#%3d:` - Type: `%s` - Group: `%s` - Disabled: `%t`\n", cc.LocalID, CommandTriggerType(cc.TriggerType).String(), gMap[cc.GroupID.Int64], cc.Disabled)
+			}
 		default:
-			out += fmt.Sprintf("`#%3d:` `%s`: %s - Group: `%s`\n", cc.LocalID, cc.TextTrigger, CommandTriggerType(cc.TriggerType).String(), gMap[cc.GroupID.Int64])
+			if cc.TextTrigger == "" {
+				cc.TextTrigger = `​`
+			}
+			if cc.Name.Valid {
+				out += fmt.Sprintf("`#%3d:` - Trigger: `%s` - Type: `%s`  - Name: `%s` - Group: `%s` - Disabled: `%t`\n", cc.LocalID, cc.TextTrigger, CommandTriggerType(cc.TriggerType).String(), cc.Name.String, gMap[cc.GroupID.Int64], cc.Disabled)
+			} else {
+				out += fmt.Sprintf("`#%3d:` - Trigger: `%s` - Type: `%s` - Group: `%s` - Disabled: `%t`\n", cc.LocalID, cc.TextTrigger, CommandTriggerType(cc.TriggerType).String(), gMap[cc.GroupID.Int64], cc.Disabled)
+			}
 		}
 	}
 
@@ -269,6 +385,10 @@ func handleDelayedRunCC(evt *schEventsModels.ScheduledEvent, data interface{}) (
 	cmd, err := models.CustomCommands(qm.Where("guild_id = ? AND local_id = ?", evt.GuildID, dataCast.CmdID)).OneG(context.Background())
 	if err != nil {
 		return false, errors.WrapIf(err, "find_command")
+	}
+
+	if cmd.Disabled {
+		return false, errors.New("custom command is disabled")
 	}
 
 	if !DelayedCCRunLimit.AllowN(DelayedRunLimitKey{GuildID: evt.GuildID, ChannelID: dataCast.ChannelID}, time.Now(), 1) {
@@ -335,6 +455,10 @@ func handleNextRunScheduledEVent(evt *schEventsModels.ScheduledEvent, data inter
 	cmd, err := models.CustomCommands(qm.Where("guild_id = ? AND local_id = ?", evt.GuildID, (data.(*NextRunScheduledEvent)).CmdID)).OneG(context.Background())
 	if err != nil {
 		return false, errors.WrapIf(err, "find_command")
+	}
+
+	if cmd.Disabled {
+		return false, errors.New("custom command is disabled")
 	}
 
 	if time.Until(cmd.NextRun.Time) > time.Second*5 {
@@ -408,6 +532,22 @@ const (
 	CCMessageExecLimitNormal  = 3
 	CCMessageExecLimitPremium = 5
 )
+
+func (p *Plugin) OnRemovedPremiumGuild(GuildID int64) error {
+	commands, err := models.CustomCommands(qm.Where("guild_id = ?", GuildID), qm.Offset(MaxCommands)).AllG(context.Background())
+	if err != nil {
+		return errors.WrapIf(err, "failed getting custom commands")
+	}
+
+	if len(commands) > 0 {
+		_, err = commands.UpdateAllG(context.Background(), models.M{"disabled": true})
+		if err != nil {
+			return errors.WrapIf(err, "failed disabling custom commands on premium removal")
+		}
+	}
+
+	return nil
+}
 
 var metricsExecutedCommands = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "yagpdb_cc_triggered_total",
@@ -554,7 +694,7 @@ func findMessageTriggerCustomCommands(ctx context.Context, cs *dstate.ChannelSta
 
 	var matched []*TriggeredCC
 	for _, cmd := range cmds {
-		if !CmdRunsInChannel(cmd, common.ChannelOrThreadParentID(cs)) || !CmdRunsForUser(cmd, ms) {
+		if cmd.Disabled || !CmdRunsInChannel(cmd, common.ChannelOrThreadParentID(cs)) || !CmdRunsForUser(cmd, ms) {
 			continue
 		}
 
@@ -590,7 +730,7 @@ func findReactionTriggerCustomCommands(ctx context.Context, cs *dstate.ChannelSt
 
 	var matched []*TriggeredCC
 	for _, cmd := range cmds {
-		if !CmdRunsInChannel(cmd, common.ChannelOrThreadParentID(cs)) {
+		if cmd.Disabled || !CmdRunsInChannel(cmd, common.ChannelOrThreadParentID(cs)) {
 			continue
 		}
 
@@ -610,6 +750,10 @@ func findReactionTriggerCustomCommands(ctx context.Context, cs *dstate.ChannelSt
 	ms, err = bot.GetMember(cs.GuildID, userID)
 	if err != nil {
 		return nil, nil, errors.WithStackIf(err)
+	}
+
+	if ms.User.Bot {
+		return nil, nil, nil
 	}
 
 	// filter by roles
@@ -986,11 +1130,6 @@ func CheckMatch(globalPrefix string, cmd *models.CustomCommand, msg string) (mat
 		args[i+1] = v.Str
 	}
 
-	// The following simply matches the legacy behavior as I'm not sure if anyone is relying on it.
-	if !cmd.TextTriggerCaseSensitive && cmd.TriggerType != int(CommandTriggerRegex) {
-		stripped = strings.ToLower(msg)
-	}
-
 	stripped = msg[idx[1]:]
 	match = true
 	return
@@ -1037,11 +1176,11 @@ func BotCachedGetCommandsWithMessageTriggers(guildID int64, ctx context.Context)
 var cmdFixCommands = &commands.YAGCommand{
 	CmdCategory:          commands.CategoryTool,
 	Name:                 "fixscheduledccs",
-	Description:          "???",
+	Description:          "Corrects the next run time of interval CCs globally, fixes issues arising from missed executions due to downtime. Bot Admin Only",
 	HideFromCommandsPage: true,
 	HideFromHelp:         true,
 	RunFunc: util.RequireBotAdmin(func(data *dcmd.Data) (interface{}, error) {
-		ccs, err := models.CustomCommands(qm.Where("trigger_type = 5"), qm.Where("now() - INTERVAL '1 hour' > next_run")).AllG(context.Background())
+		ccs, err := models.CustomCommands(qm.Where("trigger_type = 5"), qm.Where("now() - INTERVAL '1 hour' > next_run"), qm.Where("disabled = false")).AllG(context.Background())
 		if err != nil {
 			return nil, err
 		}

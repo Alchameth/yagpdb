@@ -161,6 +161,7 @@ func ChannelStateFromDgo(c *discordgo.Channel) ChannelState {
 		NSFW:                 c.NSFW,
 		Position:             c.Position,
 		Bitrate:              c.Bitrate,
+		OwnerID:              c.OwnerID,
 	}
 }
 
@@ -175,9 +176,9 @@ func GuildStateFromDgo(guild *discordgo.Guild) *GuildState {
 	return &GuildState{
 		ID:                          guild.ID,
 		Available:                   true,
-		Region:                      guild.Region,
 		MemberCount:                 int64(guild.MemberCount),
 		OwnerID:                     guild.OwnerID,
+		Region:                      guild.Region,
 		Name:                        guild.Name,
 		Icon:                        guild.Icon,
 		Description:                 guild.Description,
@@ -197,10 +198,18 @@ func GuildStateFromDgo(guild *discordgo.Guild) *GuildState {
 		WidgetEnabled:               guild.WidgetEnabled,
 		WidgetChannelID:             guild.WidgetChannelID,
 		SystemChannelID:             guild.SystemChannelID,
+		VanityURLCode:               guild.VanityURLCode,
 	}
 }
-
 func IsRoleAbove(a, b *discordgo.Role) bool {
+	if a == nil {
+		return false
+	}
+
+	if b == nil {
+		return true
+	}
+
 	if a.Position != b.Position {
 		return a.Position > b.Position
 	}

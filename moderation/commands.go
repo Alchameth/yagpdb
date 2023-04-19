@@ -18,6 +18,7 @@ import (
 	"github.com/botlabs-gg/yagpdb/v2/lib/dcmd"
 	"github.com/botlabs-gg/yagpdb/v2/lib/discordgo"
 	"github.com/botlabs-gg/yagpdb/v2/lib/dstate"
+	"github.com/botlabs-gg/yagpdb/v2/web"
 	"github.com/jinzhu/gorm"
 )
 
@@ -54,7 +55,7 @@ func MBaseCmdSecond(cmdData *dcmd.Data, reason string, reasonArgOptional bool, n
 	cmdName := cmdData.Cmd.Trigger.Names[0]
 	oreason = reason
 	if !enabled {
-		return oreason, commands.NewUserErrorf("The **%s** command is disabled on this server. Enable it in the control panel on the moderation page.", cmdName)
+		return oreason, commands.NewUserErrorf("The **%s** command is disabled on this server. It can be enabled at <%s/moderation>", cmdName, web.ManageServerURL(cmdData.GuildData))
 	}
 
 	if strings.TrimSpace(reason) == "" {
@@ -92,6 +93,28 @@ func MBaseCmdSecond(cmdData *dcmd.Data, reason string, reasonArgOptional bool, n
 	go analytics.RecordActiveUnit(cmdData.GuildData.GS.ID, &Plugin{}, "executed_cmd_"+cmdName)
 
 	return oreason, nil
+}
+
+func checkHierarchy(cmdData *dcmd.Data, targetID int64) error {
+	botMember, err := bot.GetMember(cmdData.GuildData.GS.ID, common.BotUser.ID)
+	if err != nil {
+		return commands.NewUserError("Failed fetching bot member to check hierarchy")
+	}
+
+	gs := cmdData.GuildData.GS
+	targetMember, err := bot.GetMember(gs.ID, targetID)
+	if err != nil {
+		return nil
+	}
+
+	above := bot.IsMemberAbove(gs, botMember, targetMember)
+
+	if !above {
+		cmdName := cmdData.Cmd.Trigger.Names[0]
+		return commands.NewUserErrorf("Can't use the **%s** command on members that are ranked higher than the bot.", cmdName)
+	}
+
+	return nil
 }
 
 func SafeArgString(data *dcmd.Data, arg int) string {
@@ -155,6 +178,11 @@ var ModerationCommands = []*commands.YAGCommand{
 
 			if utf8.RuneCountInString(reason) > 470 {
 				return "Error: Reason too long (can be max 470 characters).", nil
+			}
+
+			err = checkHierarchy(parsed, parsed.Args[0].Int64())
+			if err != nil {
+				return nil, err
 			}
 
 			ddays := int(config.DefaultBanDeleteDays.Int64)
@@ -263,6 +291,11 @@ var ModerationCommands = []*commands.YAGCommand{
 				return "Error: Reason too long (can be max 470 characters).", nil
 			}
 
+			err = checkHierarchy(parsed, parsed.Args[0].Int64())
+			if err != nil {
+				return nil, err
+      }
+      
 			toDel := -1
 			if parsed.Switches["cl"].Value != nil {
 				toDel = parsed.Switches["cl"].Int()
@@ -304,7 +337,7 @@ var ModerationCommands = []*commands.YAGCommand{
 			}
 
 			if config.MuteRole == "" {
-				return "No mute role set up, assign a mute role in the control panel", nil
+				return fmt.Sprintf("No mute role selected. Select one at <%s/moderation>", web.ManageServerURL(parsed.GuildData)), nil
 			}
 
 			reason := parsed.Args[2].Str()
@@ -477,7 +510,7 @@ var ModerationCommands = []*commands.YAGCommand{
 				return "Member not found", err
 			}
 
-			memberTimeout := member.Member.TimeoutExpiresAt
+			memberTimeout := member.Member.CommunicationDisabledUntil
 			if memberTimeout == nil || memberTimeout.Before(time.Now()) {
 				return "Member is not timed out", nil
 			}
@@ -597,16 +630,6 @@ var ModerationCommands = []*commands.YAGCommand{
 		DefaultEnabled:           false,
 		IsResponseEphemeral:      true,
 		RunFunc: func(parsed *dcmd.Data) (interface{}, error) {
-			botMember, err := bot.GetMember(parsed.GuildData.GS.ID, common.BotUser.ID)
-			if err != nil {
-				return "Failed fetching bot member to check permissions", nil
-			}
-
-			canClear, err := bot.AdminOrPermMS(parsed.GuildData.GS.ID, parsed.ChannelID, botMember, discordgo.PermissionManageMessages)
-			if err != nil || !canClear {
-				return "I need the `Manage Messages` permission to be able to clear messages", nil
-			}
-
 			config, _, err := MBaseCmd(parsed, 0)
 			if err != nil {
 				return nil, err

@@ -128,6 +128,33 @@ func (p *ParsedArg) Int64() int64 {
 	}
 }
 
+func (p *ParsedArg) Float64() float64 {
+	if p.Value == nil {
+		return 0
+	}
+
+	switch t := p.Value.(type) {
+	case int:
+		return float64(t)
+	case int32:
+		return float64(t)
+	case int64:
+		return float64(t)
+	case float32:
+		return float64(t)
+	case float64:
+		return float64(t)
+	case uint:
+		return float64(t)
+	case uint32:
+		return float64(t)
+	case uint64:
+		return float64(t)
+	default:
+		return 0
+	}
+}
+
 func (p *ParsedArg) Bool() bool {
 	if p.Value == nil {
 		return false
@@ -506,6 +533,10 @@ func (i *IntArg) ParseFromMessage(def *ArgDef, part string, data *Data) (interfa
 		if i.Max < v || i.Min > v {
 			return nil, &OutOfRangeError{ArgName: def.Name, Got: v, Min: i.Min, Max: i.Max}
 		}
+	} else if (i.Min != 0 || i.Max != 0) && i.Max == i.Min {
+		if v != i.Max {
+			return nil, &OutOfRangeError{ArgName: def.Name, Got: v, Min: i.Min, Max: i.Max}
+		}
 	}
 
 	return v, nil
@@ -580,6 +611,10 @@ func (f *FloatArg) ParseFromMessage(def *ArgDef, part string, data *Data) (inter
 	if f.Max != f.Min {
 		if f.Max < v || f.Min > v {
 			return nil, &OutOfRangeError{ArgName: def.Name, Got: v, Min: f.Min, Max: f.Max, Float: true}
+		}
+	} else if (f.Min != 0 || f.Max != 0) && f.Max == f.Min {
+		if v != f.Max {
+			return nil, &OutOfRangeError{ArgName: def.Name, Got: v, Min: f.Min, Max: f.Max}
 		}
 	}
 

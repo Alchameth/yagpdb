@@ -1,6 +1,7 @@
 package dstate
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -196,6 +197,9 @@ type GuildState struct {
 
 	// The Channel ID to which system messages are sent (eg join and leave messages)
 	SystemChannelID string `json:"system_channel_id"`
+
+	// Contains the vanity url of a guild
+	VanityURLCode string `json:"vanity_url_code"`
 }
 
 type ChannelState struct {
@@ -225,6 +229,13 @@ func (c *ChannelState) IsPrivate() bool {
 	return false
 }
 
+func (c *ChannelState) Mention() (string, error) {
+	if c == nil {
+		return "", errors.New("channel not found")
+	}
+	return "<#" + discordgo.StrID(c.ID) + ">", nil
+}
+
 // A fully cached member
 type MemberState struct {
 	// All the sparse fields are always available
@@ -237,12 +248,12 @@ type MemberState struct {
 }
 
 type MemberFields struct {
-	JoinedAt         discordgo.Timestamp
-	Roles            []int64
-	Nick             string
-	Avatar           string
-	Pending          bool
-	TimeoutExpiresAt *time.Time
+	JoinedAt                   discordgo.Timestamp
+	Roles                      []int64
+	Nick                       string
+	Avatar                     string
+	Pending                    bool
+	CommunicationDisabledUntil *time.Time
 }
 
 type PresenceStatus int32
@@ -282,12 +293,12 @@ func MemberStateFromMember(member *discordgo.Member) *MemberState {
 		GuildID: member.GuildID,
 
 		Member: &MemberFields{
-			JoinedAt:         member.JoinedAt,
-			Roles:            member.Roles,
-			Nick:             member.Nick,
-			Avatar:           member.Avatar,
-			Pending:          member.Pending,
-			TimeoutExpiresAt: member.TimeoutExpiresAt,
+			JoinedAt:                   member.JoinedAt,
+			Roles:                      member.Roles,
+			Nick:                       member.Nick,
+			Avatar:                     member.Avatar,
+			Pending:                    member.Pending,
+			CommunicationDisabledUntil: member.CommunicationDisabledUntil,
 		},
 		Presence: nil,
 	}
@@ -301,14 +312,14 @@ func (ms *MemberState) DgoMember() *discordgo.Member {
 	}
 
 	m := &discordgo.Member{
-		GuildID:          ms.GuildID,
-		JoinedAt:         ms.Member.JoinedAt,
-		Nick:             ms.Member.Nick,
-		Avatar:           ms.Member.Avatar,
-		Roles:            ms.Member.Roles,
-		User:             &ms.User,
-		Pending:          ms.Member.Pending,
-		TimeoutExpiresAt: ms.Member.TimeoutExpiresAt,
+		GuildID:                    ms.GuildID,
+		JoinedAt:                   ms.Member.JoinedAt,
+		Nick:                       ms.Member.Nick,
+		Avatar:                     ms.Member.Avatar,
+		Roles:                      ms.Member.Roles,
+		User:                       &ms.User,
+		Pending:                    ms.Member.Pending,
+		CommunicationDisabledUntil: ms.Member.CommunicationDisabledUntil,
 	}
 
 	if ms.Member != nil {
